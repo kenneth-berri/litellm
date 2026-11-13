@@ -162,7 +162,25 @@ def video_clip_cost(model_info: Mapping[str, object], duration: object, resoluti
     return prices.get(requested_key, {}).get(resolution.strip().lower())
 
 
+_VIDEO_PRICING_LAYERS: Final = TypeAdapter(tuple[Mapping[str, object], ...])
+
+
 def video_generation_output_cost(
+    model_info: Mapping[str, object], duration_seconds: float, video_resolution: str | None
+) -> float | None:
+    layers: Final = model_info.get("video_pricing_layers")
+    prices: Final = _VIDEO_PRICING_LAYERS.validate_python(layers) if layers is not None else (model_info,)
+    return next(
+        (
+            cost
+            for price in prices
+            if (cost := _video_generation_output_cost(price, duration_seconds, video_resolution)) is not None
+        ),
+        None,
+    )
+
+
+def _video_generation_output_cost(
     model_info: Mapping[str, object], duration_seconds: float, video_resolution: str | None
 ) -> float | None:
     clip_cost: Final = video_clip_cost(model_info, duration_seconds, video_resolution)

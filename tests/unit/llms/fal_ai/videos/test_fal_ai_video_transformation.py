@@ -91,10 +91,9 @@ def test_unpriced_clip_is_rejected_before_fal_http(
             "360p",
             {"duration": "8", "resolution": "360p"},
         ),
-        ({}, "8", "360p", {"duration": "8", "resolution": "360p"}),
     ],
 )
-def test_priced_or_non_clip_video_still_reaches_fal(
+def test_priced_video_still_reaches_fal(
     monkeypatch: pytest.MonkeyPatch,
     info: dict[str, object],
     seconds: str | None,
@@ -167,6 +166,8 @@ def test_custom_clip_pricing_controls_admission(pricing_source: str) -> None:
         ("5", {"output_cost_per_second": 0.12}, 5 * 0.12),
         ("5", {"output_cost_per_second_720p": 0.13}, 5 * 0.13),
         ("5", {"output_cost_per_video_per_second": 0.14}, 5 * 0.14),
+        ("5", {"output_cost_per_video": 0.34}, 0.34),
+        ("5", {"output_cost_per_video_clip": {"8s": {"720p": 0.73}}}, 0.5),
         ("5", {"output_cost_per_second": 0.12, "output_cost_per_video_clip": {"5s": {"720p": 0.71}}}, 0.71),
         ("8", {"output_cost_per_second": 0.12, "output_cost_per_video_clip": {"5s": {"720p": 0.71}}}, 8 * 0.12),
     ],
@@ -276,6 +277,78 @@ async def test_router_deployment_video_pricing_is_admitted_and_billed(
     assert video.status == "queued"
     assert video._hidden_params["response_cost"] == pytest.approx(expected_cost)
     assert upstream.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pricing_source", ["litellm_params", "model_info"])
+@pytest.mark.parametrize(("size", "expected_cost"), [("360p", 0.7), ("720p", 5 * 0.13)])
+async def test_resolution_override_uses_catalog_for_other_resolutions(
+    monkeypatch: pytest.MonkeyPatch, pricing_source: str, size: str, expected_cost: float
+) -> None:
+    model: Final = "fal_ai/fal-ai/pixverse/v5/transition"
+    pricing: Final = {"output_cost_per_second_720p": 0.13}
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    monkeypatch.setattr(
+        litellm,
+        "model_cost",
+        {**litellm.model_cost, model: {"output_cost_per_video_clip": {"5s": {"360p": 0.7, "720p": 0.5}}}},
+    )
+    router: Final = litellm.Router(
+        num_retries=0,
+        model_list=[
+            {
+                "model_name": "resolution-priced-video",
+                "litellm_params": {
+                    "model": model,
+                    "api_key": "synthetic-fal-key",
+                    **(pricing if pricing_source == "litellm_params" else {}),
+                },
+                "model_info": pricing if pricing_source == "model_info" else {},
+            }
+        ],
+    )
+    with respx.mock:
+        upstream: Final = respx.post("https://queue.fal.run/fal-ai/pixverse/v5/transition").mock(
+            return_value=httpx.Response(200, json={"request_id": "resolution-priced-clip"})
+        )
+        video: Final = await router.avideo_generation(
+            model="resolution-priced-video", prompt="clip", seconds="5", size=size
+        )
+    assert video._hidden_params["response_cost"] == pytest.approx(expected_cost)
+    assert upstream.call_count == 1
+
+
+@pytest.mark.parametrize("catalog", [{}, {"output_cost_per_video_clip": {"5s": {"360p": 0.7}}}])
+@pytest.mark.parametrize("pricing_source", ["direct", "model_info", "registered"])
+def test_resolution_override_without_matching_fallback_rejects_before_http(
+    monkeypatch: pytest.MonkeyPatch, catalog: dict[str, object], pricing_source: str
+) -> None:
+    model: Final = "fal_ai/fal-ai/pixverse/v5/effects"
+    pricing: Final = {"output_cost_per_second_720p": 0.13}
+    monkeypatch.setattr(
+        litellm, "model_cost", {**litellm.model_cost, model: catalog, "resolution-price-deployment": pricing}
+    )
+    custom: Final = (
+        pricing
+        if pricing_source == "direct"
+        else {"model_info": pricing}
+        if pricing_source == "model_info"
+        else {"model_info": {"id": "resolution-price-deployment"}}
+    )
+    upstream: Final = Mock(return_value=httpx.Response(200, json={"request_id": "unexpected"}))
+    with httpx.Client(transport=httpx.MockTransport(upstream)) as client:
+        with pytest.raises(litellm.BadRequestError, match="has no pricing entry") as error:
+            litellm.video_generation(
+                model=model,
+                prompt="clip",
+                seconds="8",
+                size="360p",
+                api_key="synthetic-fal-key",
+                client=HTTPHandler(client=client),
+                **custom,
+            )
+    assert error.value.status_code == 400
+    upstream.assert_not_called()
 
 
 @pytest.mark.parametrize("table", [{}, {"5s": {"360p": "invalid"}}])

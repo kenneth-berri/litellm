@@ -530,6 +530,7 @@ class ModelInfo(ModelInfoBase, total=False):
     """
 
     supported_openai_params: Required[list[str] | None]
+    video_pricing_layers: ReadOnly[tuple[Mapping[str, object], ...]]
 
 
 class GenericStreamingChunk(TypedDict, total=False):

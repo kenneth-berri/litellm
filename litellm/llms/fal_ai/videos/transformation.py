@@ -50,11 +50,10 @@ def _unpriced_video_clip(
     resolution: Final = request.get("resolution", _profile_for_model(model).default_resolution)
     try:
         info: Final = resolve_video_model_info(model, "fal_ai", _VIDEO_MODEL_INFO.validate_python(params.model_dump()))
-        if info is None or info.get("output_cost_per_video_clip") is None:
-            return None
         numeric_duration: Final = _numeric_duration(duration)
         if (
-            numeric_duration is not None
+            info is not None
+            and numeric_duration is not None
             and video_generation_output_cost(
                 info, numeric_duration, resolution if isinstance(resolution, str) else None
             )
